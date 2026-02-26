@@ -5,7 +5,8 @@ _base_ = [
 
 custom_imports = dict(
     imports=['projects.CoMaskDINO.maskdino', 
-             'projects.CoMaskDINO.models', ], allow_failed_imports=False)
+             'projects.CoMaskDINO.models',
+             'projects.CoDETRInst.models'], allow_failed_imports=False)
 
 image_size = (1024, 1024)
 dec_layers = 9 
@@ -64,6 +65,10 @@ model = dict(
         num_stuff_classes=num_stuff_classes,
         num_things_classes=num_things_classes,
         num_query=100,
+        max_pos_coords=300,
+        with_aux_mask=True,
+        aux_mask_weight=5.0,
+        aux_dice_weight=5.0,
         # in_channels are changed
         encoder=dict(
             in_channels=[256, 256, 256, 256],
@@ -121,14 +126,14 @@ model = dict(
         init_cfg=None),
     rpn_head=dict(
         type='RPNHead',
-        in_channels=64,
-        feat_channels=64,
+        in_channels=256,
+        feat_channels=256,
         anchor_generator=dict(
             type='AnchorGenerator',
             octave_base_scale=4,
             scales_per_octave=3,
             ratios=[0.5, 1.0, 2.0],
-            strides=[4, 8, 16, 32, 64, 128]),
+            strides=[4, 8, 16, 32, 64]),
         bbox_coder=dict(
             type='DeltaXYWHBBoxCoder',
             target_means=[.0, .0, .0, .0],
