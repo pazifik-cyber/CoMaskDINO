@@ -20,6 +20,7 @@ CoMaskDINOHead: MaskDINOHead + Co-DETR 协同训练辅助损失。
     └─ loss_aux_by_feat()   → cls/bbox/iou/mask/dice 全损失
 """
 
+import warnings
 from typing import List, Optional, Tuple
 
 import torch
@@ -389,8 +390,7 @@ class CoMaskDINOHead(MaskDINOHead):
         sel_masks = F.interpolate(
             sel_masks.unsqueeze(1),
             size=(mask_h, mask_w),
-            mode='bilinear',
-            align_corners=False).squeeze(1)  # [P, mask_h, mask_w]
+            mode='nearest').squeeze(1)  # [P, mask_h, mask_w]
 
         return sel_masks  # [num_pos, mask_h, mask_w]
 
@@ -498,6 +498,24 @@ class CoMaskDINOHead(MaskDINOHead):
             valid_ratios=valid_ratios,
             tgt_mask=None,
             bbox_embed=predictor.bbox_embed)
+
+        # ------------------------------------------------------------------ #
+        # 防御性检查：验证解码器返回格式的关键约定
+        #   hs         → list of L tensors，hs[i] = 第 i 层的输出特征 [M, bs, C]
+        #   ref_points → list of L+1 tensors：
+        #                ref_points[0]   = 初始 reference（输入坐标 sigmoid）
+        #                ref_points[i+1] = 第 i 层输出的 refined reference
+        #
+        # 后续 bbox 计算依赖此约定：ref_points[i] 是第 i 层的"输入"坐标，
+        # bbox_embed[i](hs[i]) + inverse_sigmoid(ref_points[i]) 得到第 i 层的"输出"坐标
+        # ------------------------------------------------------------------ #
+        if len(ref_points) != len(hs) + 1:
+            warnings.warn(
+                f"MaskDINODecoder 返回格式警告：期望 ref_points 含 {len(hs) + 1} 个元素 "
+                f"（1个初始值 + {len(hs)}个per-layer输出），实际为 {len(ref_points)}。"
+                f"请检查 MaskDINODecoder.forward() 中 ref_points 的初始化与 append 逻辑。",
+                RuntimeWarning
+            )
 
         # ------------------------------------------------------------------ #
         # Step 4: 对每解码层分别计算 cls + box + mask
@@ -657,11 +675,14 @@ class CoMaskDINOHead(MaskDINOHead):
                 is_aligned=True).clamp(0.)
             target_soft[fg_mask, labels_flat[fg_mask]] = iou_scores
 
+        # 修复：统一除以 num_pos，与 loss_bbox / loss_iou 的归一化尺度保持一致，
+        # 也与 MaskDINO 主路径 SetCriterion 的分类损失归一化方式对齐。
+        # 原代码除以 (num_pos * num_cls + 1) 会导致 cls loss 量纲比 bbox loss 小 num_cls 倍。
         loss_cls = (
             F.binary_cross_entropy_with_logits(
                 cls_scores_flat, target_soft, reduction='none'
             ).sum(-1) * lw_flat
-        ).sum() / (num_pos * num_cls + 1)
+        ).sum() / num_pos
 
         # ---- Regression: L1 + GIoU（前景正样本）----
         if fg_mask.any():
