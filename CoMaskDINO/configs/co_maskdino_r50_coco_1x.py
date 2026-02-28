@@ -4,13 +4,44 @@ _base_ = [
 ]
 
 custom_imports = dict(
-    imports=['projects.CoMaskDINO.maskdino', 
+    imports=['projects.MaskDINO.maskdino', 
+             'projects.VideoKNet.models', 
+             'projects.VideoKNet.datasets',
              'projects.CoMaskDINO.models',
              'projects.CoDETRInst.models'], allow_failed_imports=False)
 
-image_size = (1024, 1024)
-dec_layers = 9 
+# checkpoint_file = '_ckpts/eva02_L_pt_m38m_p14to16.pt'
+# load_from = 'work_dirs/maskdino_eva2_L_coconut_instance/iter_600000.pth'
+train_dataloader = dict(
+    batch_size=1,
+    num_workers=1)
+
+image_size = (256, 256)
+backbone_img_size = 1024
+dec_layers = 9  # decoder layers
+num_things_classes = 312
+num_stuff_classes = 0
 loss_lambda = 2.0
+
+max_iters = 100000  # 10 epochs
+interval = 20000
+train_cfg = dict(
+    type='IterBasedTrainLoop',
+    max_iters=max_iters,
+    val_interval=interval)
+
+param_scheduler = [
+    dict(
+        type='LinearLR', start_factor=1e-6, by_epoch=False, begin=0, end=1000),
+    dict(
+        T_max=49000,
+        begin=1000,
+        by_epoch=False,
+        end=max_iters,
+        type='CosineAnnealingLR'
+    )
+]
+
 batch_augments = [
     dict(
         type='BatchFixedSizePad',
@@ -18,10 +49,8 @@ batch_augments = [
         img_pad_value=0,
         pad_mask=True,
         mask_pad_value=0,
-        pad_seg=True,
-        seg_pad_value=255)
+        pad_seg=False)
 ]
-
 data_preprocessor = dict(
     type='DetDataPreprocessor',
     mean=[123.675, 116.28, 103.53],
@@ -30,12 +59,9 @@ data_preprocessor = dict(
     pad_size_divisor=32,
     pad_mask=True,
     mask_pad_value=0,
-    pad_seg=True,
-    seg_pad_value=255,
+    pad_seg=False,
     batch_augments=batch_augments)
 
-num_things_classes = 126
-num_stuff_classes = 0
 num_classes = num_things_classes + num_stuff_classes
 
 model = dict(
@@ -69,7 +95,8 @@ model = dict(
         with_aux_mask=True,
         aux_mask_weight=5.0,
         aux_dice_weight=5.0,
-        # in_channels are changed
+        # in_channels are changed (now matches neck output: all 256 channels)
+        # Note: encoder only uses first 4 levels from neck output
         encoder=dict(
             in_channels=[256, 256, 256, 256],
             in_strides=[4, 8, 16, 32],
@@ -307,34 +334,6 @@ model = dict(
     ),
     init_cfg=None)
 
-
-train_dataloader = dict(
-    batch_size=1,
-    num_workers=1)
-
-val_dataloader = dict(
-    batch_size=2,
-    num_workers=2)
-
-
-max_iters = 50000  # 10 epochs
-interval = 10000
-train_cfg = dict(
-    type='IterBasedTrainLoop',
-    max_iters=max_iters,
-    val_interval=interval)
-
-param_scheduler = [
-    dict(
-        type='LinearLR', start_factor=1e-6, by_epoch=False, begin=0, end=1000),
-    dict(
-        T_max=49000,
-        begin=1000,
-        by_epoch=False,
-        end=max_iters,
-        type='CosineAnnealingLR'
-    )
-]
 
 # optimizer
 embed_multi = dict(lr_mult=1.0, decay_mult=0.0)
