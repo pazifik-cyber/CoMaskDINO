@@ -34,7 +34,7 @@ from mmdet.structures.bbox import (bbox_cxcywh_to_xyxy, bbox_overlaps,
                                    bbox_xyxy_to_cxcywh)
 from mmdet.utils import reduce_mean
 
-from .maskdino.maskdino_head import MaskDINOHead
+from projects.MaskDINO.maskdino import MaskDINOHead
 
 # SetCriterion 不接受的 train_cfg 键（属于辅助头配置）
 _AUX_CFG_KEYS = frozenset(['rpn', 'rpn_proposal', 'rcnn', 'bbox_head'])
@@ -141,9 +141,11 @@ class CoMaskDINOHead(MaskDINOHead):
             self.pixel_decoder.forward_features(feats, None)
 
         # Step 2: 构建辅助查询，同时匹配 GT masks
+        #   mask_features 用于确定 GT mask 的目标分辨率（与 mask_preds 保持一致）
         aux_targets = self.get_aux_targets(
             pos_coords, batch_img_metas, multi_scale_feats, head_idx,
-            batch_gt_instances=batch_gt_instances if self.with_aux_mask else None)
+            batch_gt_instances=batch_gt_instances if self.with_aux_mask else None,
+            mask_features=mask_features)
 
         # Step 3: 完整解码器前向（cls + box + mask）
         all_cls_scores, all_bbox_preds, all_mask_preds = self.forward_aux_decoder(
@@ -176,7 +178,8 @@ class CoMaskDINOHead(MaskDINOHead):
                         img_metas: List[dict],
                         mlvl_feats: List[Tensor],
                         head_idx: int,
-                        batch_gt_instances=None) -> tuple:
+                        batch_gt_instances=None,
+                        mask_features: Optional[Tensor] = None) -> tuple:
         """将辅助头正样本转化为解码器查询格式，并匹配 GT masks。
 
         pos_coords 格式说明：
@@ -189,6 +192,10 @@ class CoMaskDINOHead(MaskDINOHead):
           对每张图的每个正样本查询，其 aux_bbox_targets 与图中某 GT 实例的 bbox 完全对应
           （正是由辅助头 assigner 分配的 GT bbox）。通过计算 aux_bbox_targets 与
           gt_instances.bboxes 的 IoU，找到最匹配的 GT 实例，取其 mask。
+
+        Args:
+            mask_features: [bs, C, H_m, W_m] 用于确定 GT mask 的目标分辨率，
+                          必须与 mask_preds 的分辨率一致。若为 None，则使用 mlvl_feats[-1]。
 
         Returns:
             9-tuple:
@@ -293,10 +300,14 @@ class CoMaskDINOHead(MaskDINOHead):
             # ---- GT Mask 匹配 ----
             if batch_gt_instances is not None:
                 gt_inst = batch_gt_instances[i]
+                # 使用 mask_features 的分辨率（与 mask_preds 一致）
+                if mask_features is not None:
+                    mask_h, mask_w = mask_features.shape[-2], mask_features.shape[-1]
+                else:
+                    mask_h, mask_w = mlvl_feats[-1].shape[-2], mlvl_feats[-1].shape[-1]
                 pos_gt_masks = self._match_gt_masks(
                     pos_target_norm, gt_inst, img_h, img_w,
-                    mask_h=mlvl_feats[-1].shape[-2],
-                    mask_w=mlvl_feats[-1].shape[-1])
+                    mask_h=mask_h, mask_w=mask_w)
                 out_gt_masks.append(pos_gt_masks)   # [num_pos, H_m, W_m] or None
 
         aux_coords  = torch.stack(out_coords)    # [bs, M, 4]
@@ -308,9 +319,14 @@ class CoMaskDINOHead(MaskDINOHead):
         aux_gt_masks_t = None
         if batch_gt_instances is not None and any(
                 m is not None for m in out_gt_masks):
-            # 获取 mask 分辨率（来自最后一级，也即最大的 FPN 特征图）
-            mh = mlvl_feats[-1].shape[-2]
-            mw = mlvl_feats[-1].shape[-1]
+            # 获取 mask 分辨率（必须与 mask_preds 一致，来自 mask_features）
+            # mask_features: [bs, C, H_m, W_m]，用于生成 mask_preds
+            if mask_features is not None:
+                mh, mw = mask_features.shape[-2], mask_features.shape[-1]
+            else:
+                # 回退：使用最后一级 FPN 特征（可能与 mask_preds 不匹配）
+                mh = mlvl_feats[-1].shape[-2]
+                mw = mlvl_feats[-1].shape[-1]
             # 构建 [bs, M, mh, mw] 零 tensor，再填入有效 mask
             aux_gt_masks_t = aux_coords.new_zeros(bs, max_num, mh, mw)
             for i, pos_gt_masks in enumerate(out_gt_masks):
@@ -685,6 +701,11 @@ class CoMaskDINOHead(MaskDINOHead):
         """
         bs, M, H, W = mask_preds.shape
         num_pos = max(mask_weights.sum().item(), 1)
+
+        # 断言：确保 mask_preds 和 gt_masks 空间维度一致
+        # 如果不一致，说明 get_aux_targets 中使用了错误的分辨率
+        assert gt_masks.shape[-2:] == (H, W), \
+            f"Spatial dimension mismatch: mask_preds={mask_preds.shape}, gt_masks={gt_masks.shape}"
 
         # 重塑为 [bs*M, 1, H, W] 进行点采样
         mask_preds_flat = mask_preds.reshape(bs * M, 1, H, W)
